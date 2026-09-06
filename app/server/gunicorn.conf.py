@@ -50,7 +50,7 @@ tmp_upload_dir = None
 preload_app = False  # Changed from True - SQLite doesn't like forking
 
 # Worker tmp directory
-worker_tmp_dir = "/dev/shm"  # Use RAM for worker tmp files
+worker_tmp_dir = "/dev/shm" if os.path.isdir("/dev/shm") else None  # RAM on Linux; macOS has no /dev/shm
 
 # Sentinel files used to elect exactly one worker per gunicorn lifetime.
 # Uses /dev/shm (already our worker_tmp_dir) which is guaranteed writable.

@@ -70,6 +70,15 @@ def set_sqlite_pragma(dbapi_conn, connection_record):
 db = SQLAlchemy()
 migrate = Migrate()
 
+# Alembic migrations live at the repo root in a source checkout, and inside the
+# package when installed from the wheel (scripts/build_wheel.sh copies them in).
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+MIGRATIONS_DIR = os.environ.get("FIRESHARE_MIGRATIONS_DIR") or (
+    os.path.join(_PKG_DIR, "migrations")
+    if os.path.isdir(os.path.join(_PKG_DIR, "migrations"))
+    else os.path.abspath(os.path.join(_PKG_DIR, "..", "..", "..", "migrations"))
+)
+
 def update_config(path):
     logger.debug("Validating configuration file...")
     def combine(dict1, dict2):
@@ -326,7 +335,7 @@ def create_app(init_schedule=False):
             _f.truncate()
 
     db.init_app(app)
-    migrate.init_app(app, db)
+    migrate.init_app(app, db, directory=MIGRATIONS_DIR)
 
     # Reset any transcode jobs that were marked 'running' when the container
     # last shut down — those processes are gone, so the jobs need to be retried.
@@ -483,7 +492,7 @@ def create_app(init_schedule=False):
         except Exception:
             pass  # table doesn't exist yet; will be created by flask db upgrade
 
-        from sqlalchemy.exc import OperationalError
+        from sqlalchemy.exc import OperationalError, IntegrityError
         from werkzeug.security import generate_password_hash, check_password_hash
         from .models import User as _User
         try:
@@ -531,5 +540,9 @@ def create_app(init_schedule=False):
                     db.session.commit()
         except OperationalError:
             pass  # tables don't exist yet (e.g. during flask db upgrade), skip init
+        except IntegrityError:
+            # Several gunicorn workers boot at once on a fresh database and race to
+            # insert the same admin row; whoever lost just uses the winner's row.
+            db.session.rollback()
 
         return app

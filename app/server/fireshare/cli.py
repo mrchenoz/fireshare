@@ -248,9 +248,127 @@ def _reconcile_media_folders(media_type, model, snapshot):
         folder.updated_at = datetime.utcnow()
 
 
+ENV_FILE_VARS = ("VIDEO_DIRECTORY", "DATA_DIRECTORY", "PROCESSED_DIRECTORY", "IMAGE_DIRECTORY",
+                 "ENVIRONMENT", "DOMAIN", "THUMBNAIL_VIDEO_LOCATION", "ENABLE_TRANSCODING",
+                 "SERVE_GAME_ASSETS_NGINX", "ADMIN_USERNAME", "LOGIN_IP_WHITELIST_TRUSTED_PROXIES")
+
+
+def _env_file():
+    from pathlib import Path
+    base = os.environ.get("FIRESHARE_HOME") or str(Path.home() / ".local/share/fireshare")
+    return Path(base) / "env"
+
+
+def _load_env_file():
+    """Wheel installs: `fireshare serve` records its resolved settings in
+    ~/.local/share/fireshare/env so the other commands (scan-videos, add-user, ...)
+    work without re-exporting a dozen variables. Docker never hits this path
+    because it sets DATA_DIRECTORY itself."""
+    if "DATA_DIRECTORY" in os.environ:
+        return
+    f = _env_file()
+    if not f.is_file():
+        return
+    for line in f.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key.strip() and key.strip() not in os.environ:
+            os.environ[key.strip()] = value.strip()
+    # secrets stay in their own 0600 files, not in the env file
+    from pathlib import Path
+    data = Path(os.environ.get("DATA_DIRECTORY", ""))
+    for var, name in (("SECRET_KEY", "secret_key"), ("ADMIN_PASSWORD", "admin_password")):
+        if var not in os.environ and (data / name).is_file():
+            os.environ[var] = (data / name).read_text().strip()
+
+
 @click.group()
 def cli():
-    pass
+    _load_env_file()
+
+@cli.command("db-upgrade")
+def db_upgrade():
+    """Apply pending database migrations (same as `flask db upgrade`, no FLASK_APP needed)."""
+    from flask_migrate import upgrade
+    from . import MIGRATIONS_DIR
+    with create_app().app_context():
+        upgrade(directory=MIGRATIONS_DIR)
+        logger.info(f"Database is up to date ({current_app.config['SQLALCHEMY_DATABASE_URI']})")
+
+
+def _serve_defaults(videos, data, host):
+    """Fill the env the app expects from a few flags, for wheel installs.
+
+    Docker sets these in the compose file; outside Docker we default the data
+    folders under ~/.local/share/fireshare and persist a SECRET_KEY there so
+    logins survive restarts and are shared by all gunicorn workers.
+    """
+    import secrets
+    from pathlib import Path
+
+    base = Path(data or os.environ.get("FIRESHARE_HOME") or Path.home() / ".local/share/fireshare")
+    if videos:
+        os.environ["VIDEO_DIRECTORY"] = str(Path(videos).expanduser().resolve()) + "/"
+    if "VIDEO_DIRECTORY" not in os.environ:
+        raise click.UsageError("Pass --videos DIR or set VIDEO_DIRECTORY.")
+    for var, sub in (("DATA_DIRECTORY", "data"), ("PROCESSED_DIRECTORY", "processed"),
+                     ("IMAGE_DIRECTORY", "images")):
+        path = Path(os.environ.get(var) or base / sub)
+        path.mkdir(parents=True, exist_ok=True)
+        os.environ[var] = str(path) + "/"
+    os.environ.setdefault("ENVIRONMENT", "production")
+    os.environ.setdefault("DOMAIN", "")
+    os.environ.setdefault("THUMBNAIL_VIDEO_LOCATION", "50")
+    os.environ.setdefault("ENABLE_TRANSCODING", "false")
+    os.environ.setdefault("SERVE_GAME_ASSETS_NGINX", "false")
+    os.environ.setdefault("ADMIN_USERNAME", "admin")
+    if "SECRET_KEY" not in os.environ:
+        key_file = Path(os.environ["DATA_DIRECTORY"]) / "secret_key"
+        if not key_file.exists():
+            key_file.write_text(secrets.token_hex(32))
+            key_file.chmod(0o600)
+        os.environ["SECRET_KEY"] = key_file.read_text().strip()
+    if "ADMIN_PASSWORD" not in os.environ:
+        pw_file = Path(os.environ["DATA_DIRECTORY"]) / "admin_password"
+        if not pw_file.exists():
+            pw_file.write_text(secrets.token_urlsafe(12))
+            pw_file.chmod(0o600)
+            click.echo(f"Generated admin password, stored in {pw_file}")
+        os.environ["ADMIN_PASSWORD"] = pw_file.read_text().strip()
+    # No nginx in front of us: let Flask serve videos and count the client as hop 0
+    os.environ.setdefault("LOGIN_IP_WHITELIST_TRUSTED_PROXIES", "0")
+    env_file = _env_file()
+    env_file.parent.mkdir(parents=True, exist_ok=True)
+    env_file.write_text("".join(f"{k}={os.environ[k]}\n" for k in ENV_FILE_VARS if k in os.environ))
+
+
+@cli.command()
+@click.option("--videos", help="Folder of videos to index (or set VIDEO_DIRECTORY)")
+@click.option("--data", help="Base folder for data/processed/images (default ~/.local/share/fireshare)")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Bind address; 0.0.0.0 to serve the LAN")
+@click.option("--port", default=8000, show_default=True, type=int)
+@click.option("--workers", default=2, show_default=True, type=int)
+@click.option("--skip-upgrade", is_flag=True, help="Do not run database migrations first")
+def serve(videos, data, host, port, workers, skip_upgrade):
+    """Run Fireshare with gunicorn using the packaged config (wheel installs, no Docker)."""
+    _serve_defaults(videos, data, host)
+    if not skip_upgrade:
+        from flask_migrate import upgrade
+        from . import MIGRATIONS_DIR
+        with create_app().app_context():
+            upgrade(directory=MIGRATIONS_DIR)
+        # On a fresh database the app above skipped its user setup because the
+        # tables did not exist yet; run it once now so the workers don't race.
+        create_app()
+    conf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gunicorn.conf.py")
+    # Run gunicorn through this interpreter: in a `uv tool` install only the
+    # `fireshare` command is on PATH, gunicorn lives inside the tool's venv.
+    args = [sys.executable, "-m", "gunicorn", "--bind", f"{host}:{port}", "--workers", str(workers)]
+    if os.path.isfile(conf):
+        args += ["--config", conf]
+    args.append("fireshare:create_app(init_schedule=True)")
+    click.echo(f"Serving {os.environ['VIDEO_DIRECTORY']} on http://{host}:{port}/ (user {os.environ['ADMIN_USERNAME']})")
+    os.execv(sys.executable, args)
+
 
 @cli.command()
 def init_db():
