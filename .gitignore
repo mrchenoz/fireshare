@@ -162,3 +162,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 ldap
+
+# Staged into the package only while scripts/build_wheel.sh runs
+app/server/fireshare/build/
+app/server/fireshare/migrations/
+app/server/fireshare/gunicorn.conf.py
+app/server/*.egg-info/
