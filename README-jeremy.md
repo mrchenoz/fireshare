@@ -28,17 +28,13 @@ scripts/build_wheel.sh                # builds the client with npm, then the whe
 scripts/build_wheel.sh --reuse-client # skip npm if app/client/build exists
 ```
 
-Version comes from `git describe --tags` (override with `FIRESHARE_VERSION=…`). Publish the wheel as a GitHub release asset so the Macs can fetch it by URL.
+Version comes from `git describe --tags` (override with `FIRESHARE_VERSION=…`). Publish the wheel as a GitHub release asset; the repo is public, so `uv tool install <asset URL>` works from any machine.
 
 ## Install on a machine (Intel/Apple Silicon Mac, Linux, Pi)
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh          # once
-# the repo is private, so fetch the release asset with gh (logged in as mrchenoz or jeremy-oz), then install the file
-gh release download v1.7.9-wheel1 --repo mrchenoz/fireshare --pattern '*.whl'
-uv tool install --python 3.12 ./fireshare-1.7.9-py3-none-any.whl
-# (if the repo is ever made public, the one-liner works instead:
-#  uv tool install --python 3.12 https://github.com/mrchenoz/fireshare/releases/download/v1.7.9-wheel1/fireshare-1.7.9-py3-none-any.whl)
+uv tool install --python 3.12 https://github.com/mrchenoz/fireshare/releases/download/v1.7.9-wheel1/fireshare-1.7.9-py3-none-any.whl
 # ffmpeg + ffprobe on PATH: Linux `pacman -S ffmpeg` / `apt install ffmpeg`;
 # macOS without Homebrew: static builds from https://evermeet.cx/ffmpeg/ into ~/.local/bin
 fireshare serve --videos ~/Videos --host 0.0.0.0 --port 8000
